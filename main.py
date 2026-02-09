@@ -6,14 +6,58 @@ import time
 import random
 import os
 import csv
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # -------- SETTINGS --------
-RUN_NAME = "test_run"  # change later for experiments
-STEP_DELAY = 0.05          # 20 FPS
-RUN_DURATION = 10          # seconds (change this!)
-FRAME_SAVE_INTERVAL = 4    # save every x frame
+RUN_NAME = os.getenv("RUN_NAME")
+STEP_DELAY = float(os.getenv("STEP_DELAY"))
+RUN_DURATION = float(os.getenv("RUN_DURATION"))
+FRAME_SAVE_INTERVAL = int(os.getenv("FRAME_SAVE_INTERVAL"))
+
+print("Config:", RUN_NAME, STEP_DELAY, RUN_DURATION, FRAME_SAVE_INTERVAL)
 
 hp_region = {"top": 1000, "left": 30, "width": 120, "height": 60}
+
+# -------- LOAD HP TEMPLATES --------
+template_paths = {
+    4: ["templates/hp_4.png"],
+    3: ["templates/hp_3.png"],
+    2: ["templates/hp_2.png"],
+    1: [
+        "templates/hp_white_1.png",
+        "templates/hp_red_1.png",
+        "templates/hp_flicker_1.png"
+    ],
+    0: ["templates/hp_dead.png"]
+}
+
+templates = {}
+
+for hp_value, paths in template_paths.items():
+    templates[hp_value] = []
+    for p in paths:
+        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+        templates[hp_value].append(img)
+
+last_damage_time = 0
+DAMAGE_COOLDOWN = 1.0
+
+def detect_hp_from_template(hp_gray):
+    best_score = -1
+    best_hp = None
+
+    for hp_value, template_list in templates.items():
+        for tmpl in template_list:
+            res = cv2.matchTemplate(hp_gray, tmpl, cv2.TM_CCOEFF_NORMED)
+            score = res.max()
+
+            if score > best_score:
+                best_score = score
+                best_hp = hp_value
+
+    return best_hp, best_score
 
 # -------- LOGGING SETUP --------
 run_timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
@@ -25,7 +69,6 @@ os.makedirs(frames_dir, exist_ok=True)
 csv_file = open(os.path.join(run_dir, "actions.csv"), "w", newline="")
 csv_writer = csv.writer(csv_file)
 csv_writer.writerow(["step", "move", "crouch", "shoot", "dash", "time"])
-
 
 # -------- INPUT CONTROL --------
 held_keys = set()
@@ -39,13 +82,11 @@ def release_all_keys():
 def update_held_keys(target_keys):
     global held_keys
 
-    # Release keys not needed anymore
     for key in list(held_keys):
         if key not in target_keys:
             pydirectinput.keyUp(key)
             held_keys.remove(key)
 
-    # Press new keys
     for key in target_keys:
         if key not in held_keys:
             pydirectinput.keyDown(key)
@@ -58,13 +99,15 @@ print("Go!")
 start_time = time.time()
 step = 0
 
+last_hp = 4
+current_hp = 4
+
 with mss.mss() as sct:
     monitor = sct.monitors[1]
 
     try:
         while True:
 
-            # Stop after RUN_DURATION seconds
             if time.time() - start_time > RUN_DURATION:
                 print("Time limit reached.")
                 break
@@ -76,7 +119,6 @@ with mss.mss() as sct:
             img_gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
             img_small = cv2.resize(img_gray, (320, 180))
 
-            # Debug view
             display = cv2.resize(img_small, (640, 360), interpolation=cv2.INTER_NEAREST)
             cv2.imshow("Agent View", display)
 
@@ -84,6 +126,49 @@ with mss.mss() as sct:
             hp_screenshot = sct.grab(hp_region)
             hp_img = np.array(hp_screenshot)
             hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
+
+            detected_hp, score = detect_hp_from_template(hp_gray)
+
+            now = time.time()
+
+            if detected_hp is not None:
+
+                # Only allow HP to decrease if cooldown passed
+                if detected_hp < last_hp:
+
+                    if now - last_damage_time > DAMAGE_COOLDOWN:
+                        # Force exactly -1 damage
+                        current_hp = last_hp - 1
+                        last_damage_time = now
+                        print("Damage confirmed (cooldown passed)")
+                    else:
+                        # Ignore flicker damage
+                        current_hp = last_hp
+
+                else:
+                    # Same HP or higher (ignore increases)
+                    current_hp = last_hp
+            else:
+                current_hp = last_hp
+
+
+            if current_hp < last_hp:
+                print("Damage taken!")
+
+            if current_hp == 0 and last_hp != 0:
+                print("Episode finished (HP reached 0)")
+
+            last_hp = current_hp
+
+            print("HP detected:", current_hp, "score:", round(score, 3))
+
+            # -------- DEATH SAFETY --------
+            if current_hp == 0:
+                print("DEAD detected - stopping inputs")
+                release_all_keys()
+                time.sleep(STEP_DELAY)
+                step += 1
+                continue
 
             hp_display = cv2.resize(hp_gray, (240, 480), interpolation=cv2.INTER_NEAREST)
             cv2.imshow("HP View", hp_display)
@@ -110,7 +195,6 @@ with mss.mss() as sct:
 
             update_held_keys(target_keys)
 
-            # Reassert shooting every loop
             if shoot:
                 pydirectinput.keyDown("s")
 
@@ -121,11 +205,8 @@ with mss.mss() as sct:
             if step % FRAME_SAVE_INTERVAL == 0:
                 frame_path = os.path.join(frames_dir, f"frame_{step:06d}.png")
                 cv2.imwrite(frame_path, img_small)
-
                 csv_writer.writerow([step, move, crouch, shoot, dash, time.time()])
 
-
-            # -------- TIMING --------
             time.sleep(STEP_DELAY)
             step += 1
 

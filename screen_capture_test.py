@@ -2,41 +2,45 @@ import time
 import mss
 import numpy as np
 import cv2
+import os
 
 print("Starting in 5 seconds... switch to Cuphead!")
 time.sleep(5)
 
+# Create logs folder if not existing
+os.makedirs("logs/debug", exist_ok=True)
+
+# -------- FULL SCREEN --------
 with mss.mss() as sct:
-    # Full screen for RL
-    monitor = sct.monitors[1]  # full primary screen
+    monitor = sct.monitors[1]
     screenshot = sct.grab(monitor)
 
-# Convert to numpy array
 img = np.array(screenshot)
 
-# Convert to grayscale
+# Grayscale + resize
 img_gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-
-# Resize to smaller dimensions (e.g., 160x90) for CNN input
 img_small = cv2.resize(img_gray, (320, 180))
 
-# Display for testing
-# cv2.imshow("Small Grayscale Screenshot", img_small)
-# cv2.waitKey(0)
-# cv2.destroyAllWindows()
+# Save full observation
+cv2.imwrite("logs/debug/full_observation_320x180.png", img_small)
 
-# HP region for OCR (adjust after testing)
-hp_region = {"top": 1000, "left": 30, "width": 120, "height": 60}  # example values
+# -------- HP REGION --------
+hp_region = {"top": 1000, "left": 30, "width": 120, "height": 60}
 
 with mss.mss() as sct:
     hp_screenshot = sct.grab(hp_region)
 
-# Convert to numpy array and grayscale for OCR
 hp_img = np.array(hp_screenshot)
+
+# Save raw HP crop (color)
+cv2.imwrite("logs/debug/hp_raw_color.png", hp_img)
+
+# Grayscale for analysis
 hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
+cv2.imwrite("logs/debug/hp_gray.png", hp_gray)
 
-cv2.imshow("HP Region", hp_gray)
-cv2.waitKey(0)
-cv2.destroyAllWindows()
+# Optional threshold version (helps a lot for OCR)
+_, hp_thresh = cv2.threshold(hp_gray, 150, 255, cv2.THRESH_BINARY)
+cv2.imwrite("logs/debug/hp_threshold.png", hp_thresh)
 
-print("finished") 
+print("Saved images to logs/debug/")
