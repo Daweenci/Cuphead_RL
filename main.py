@@ -6,45 +6,55 @@ import time
 import random
 import os
 import csv
-from dotenv import load_dotenv
+import yaml
 
-load_dotenv()
 
-# -------- SETTINGS --------
-RUN_NAME = os.getenv("RUN_NAME")
-STEP_DELAY = float(os.getenv("STEP_DELAY"))
-RUN_DURATION = float(os.getenv("RUN_DURATION"))
-FRAME_SAVE_INTERVAL = int(os.getenv("FRAME_SAVE_INTERVAL"))
+# ============================================================
+# CONFIG
+# ============================================================
 
-print("Config:", RUN_NAME, STEP_DELAY, RUN_DURATION, FRAME_SAVE_INTERVAL)
+def load_config(path="config.yaml"):
+    with open(path, "r") as f:
+        cfg = yaml.safe_load(f)
 
-hp_region = {"top": 1000, "left": 30, "width": 120, "height": 60}
+    print(
+        "Config:",
+        cfg["run_name"],
+        cfg["step_delay"],
+        cfg["frame_save_interval"],
+        cfg["num_episodes"]
+    )
+    return cfg
 
-# -------- LOAD HP TEMPLATES --------
-template_paths = {
-    4: ["templates/hp_4.png"],
-    3: ["templates/hp_3.png"],
-    2: ["templates/hp_2.png"],
-    1: [
-        "templates/hp_white_1.png",
-        "templates/hp_red_1.png",
-        "templates/hp_flicker_1.png"
-    ],
-    0: ["templates/hp_dead.png"]
-}
 
-templates = {}
+# ============================================================
+# HP TEMPLATE HANDLING
+# ============================================================
 
-for hp_value, paths in template_paths.items():
-    templates[hp_value] = []
-    for p in paths:
-        img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
-        templates[hp_value].append(img)
+def load_hp_templates():
+    template_paths = {
+        4: ["templates/hp_4.png"],
+        3: ["templates/hp_3.png"],
+        2: ["templates/hp_2.png"],
+        1: [
+            "templates/hp_white_1.png",
+            "templates/hp_red_1.png",
+            "templates/hp_flicker_1.png"
+        ],
+        0: ["templates/hp_dead.png"]
+    }
 
-last_damage_time = 0
-DAMAGE_COOLDOWN = 1.0
+    templates = {}
+    for hp_value, paths in template_paths.items():
+        templates[hp_value] = []
+        for p in paths:
+            img = cv2.imread(p, cv2.IMREAD_GRAYSCALE)
+            templates[hp_value].append(img)
 
-def detect_hp_from_template(hp_gray):
+    return templates
+
+
+def detect_hp_from_template(hp_gray, templates):
     best_score = -1
     best_hp = None
 
@@ -59,29 +69,22 @@ def detect_hp_from_template(hp_gray):
 
     return best_hp, best_score
 
-# -------- LOGGING SETUP --------
-run_timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
-run_dir = os.path.join("logs", f"{RUN_NAME}_{run_timestamp}")
-frames_dir = os.path.join(run_dir, "frames")
 
-os.makedirs(frames_dir, exist_ok=True)
+# ============================================================
+# INPUT CONTROL
+# ============================================================
 
-csv_file = open(os.path.join(run_dir, "actions.csv"), "w", newline="")
-csv_writer = csv.writer(csv_file)
-csv_writer.writerow(["step", "move", "crouch", "shoot", "dash", "time"])
-
-# -------- INPUT CONTROL --------
 held_keys = set()
 pydirectinput.PAUSE = 0
+
 
 def release_all_keys():
     for key in list(held_keys):
         pydirectinput.keyUp(key)
     held_keys.clear()
 
-def update_held_keys(target_keys):
-    global held_keys
 
+def update_held_keys(target_keys):
     for key in list(held_keys):
         if key not in target_keys:
             pydirectinput.keyUp(key)
@@ -92,126 +95,205 @@ def update_held_keys(target_keys):
             pydirectinput.keyDown(key)
             held_keys.add(key)
 
-print("Switch to Cuphead in 5 seconds...")
-time.sleep(5)
-print("Go!")
 
-start_time = time.time()
-step = 0
+def press_enter():
+    pydirectinput.keyDown("enter")
+    time.sleep(0.5)
+    pydirectinput.keyUp("enter")
 
-last_hp = 4
-current_hp = 4
 
-with mss.mss() as sct:
-    monitor = sct.monitors[1]
+# ============================================================
+# LOGGING SETUP
+# ============================================================
 
-    try:
-        while True:
+def setup_logging(run_name):
+    run_timestamp = time.strftime("%Y-%m-%d_%H-%M-%S")
+    run_dir = os.path.join("logs", f"{run_name}_{run_timestamp}")
 
-            if time.time() - start_time > RUN_DURATION:
-                print("Time limit reached.")
-                break
+    frames_dir = os.path.join(run_dir, "frames")
+    progress_dir = os.path.join(run_dir, "progressbar_screenshots")
 
-            # -------- OBSERVATION --------
-            screenshot = sct.grab(monitor)
-            img = np.array(screenshot)
+    os.makedirs(frames_dir, exist_ok=True)
+    os.makedirs(progress_dir, exist_ok=True)
 
-            img_gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-            img_small = cv2.resize(img_gray, (320, 180))
+    csv_file = open(os.path.join(run_dir, "actions.csv"), "w", newline="")
+    csv_writer = csv.writer(csv_file)
+    csv_writer.writerow(
+        ["episode", "step", "move", "crouch", "shoot", "dash", "hp", "time"]
+    )
 
-            display = cv2.resize(img_small, (640, 360), interpolation=cv2.INTER_NEAREST)
-            cv2.imshow("Agent View", display)
+    return frames_dir, progress_dir, csv_file, csv_writer
 
-            # -------- HP REGION --------
-            hp_screenshot = sct.grab(hp_region)
-            hp_img = np.array(hp_screenshot)
-            hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
 
-            detected_hp, score = detect_hp_from_template(hp_gray)
+# ============================================================
+# EPISODE LOGIC
+# ============================================================
 
-            now = time.time()
+def run_episode(
+    episode,
+    cfg,
+    sct,
+    monitor,
+    templates,
+    frames_dir,
+    progress_dir,
+    csv_writer,
+    hp_region,
+    progress_region
+):
+    STEP_DELAY = cfg["step_delay"]
+    FRAME_SAVE_INTERVAL = cfg["frame_save_interval"]
 
-            if detected_hp is not None:
+    DAMAGE_COOLDOWN = 1.0
+    EPISODE_END_WAIT = 4.0
+    EPISODE_START_WAIT = 3.6
 
-                # Only allow HP to decrease if cooldown passed
-                if detected_hp < last_hp:
+    step = 0
+    last_hp = 4
+    current_hp = 4
+    last_damage_time = 0.0
 
-                    if now - last_damage_time > DAMAGE_COOLDOWN:
-                        # Force exactly -1 damage
-                        current_hp = last_hp - 1
-                        last_damage_time = now
-                        print("Damage confirmed (cooldown passed)")
-                    else:
-                        # Ignore flicker damage
-                        current_hp = last_hp
+    while True:
+        # -------- OBSERVATION --------
+        screenshot = sct.grab(monitor)
+        img = np.array(screenshot)
 
-                else:
-                    # Same HP or higher (ignore increases)
-                    current_hp = last_hp
+        img_gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        img_small = cv2.resize(img_gray, (320, 180))
+
+        display = cv2.resize(img_small, (640, 360), interpolation=cv2.INTER_NEAREST)
+        cv2.imshow("Agent View", display)
+
+        # -------- HP DETECTION --------
+        hp_screenshot = sct.grab(hp_region)
+        hp_img = np.array(hp_screenshot)
+        hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
+
+        detected_hp, score = detect_hp_from_template(hp_gray, templates)
+        now = time.time()
+
+        if detected_hp is not None and detected_hp < last_hp:
+            if now - last_damage_time > DAMAGE_COOLDOWN:
+                current_hp = last_hp - 1
+                last_damage_time = now
+                print("Damage confirmed")
             else:
                 current_hp = last_hp
+        else:
+            current_hp = last_hp
+
+        print(f"HP: {current_hp} | score: {round(score, 3)}")
+
+        # -------- DEATH --------
+        if current_hp == 0:
+            print("DEAD - ending episode")
+            release_all_keys()
+
+            time.sleep(EPISODE_END_WAIT)
+
+            # -------- PROGRESS SCREENSHOT (RESTORED) --------
+            progress_screenshot = sct.grab(progress_region)
+            progress_img = np.array(progress_screenshot)
+            progress_gray = cv2.cvtColor(progress_img, cv2.COLOR_BGRA2GRAY)
+
+            progress_path = os.path.join(
+                progress_dir, f"episode_{episode}_progress.png"
+            )
+            cv2.imwrite(progress_path, progress_gray)
+
+            press_enter()
+            time.sleep(EPISODE_START_WAIT)
+            break
+
+        last_hp = current_hp
+
+        # -------- ACTION POLICY --------
+        move = random.choice(["left", "right", None])
+        crouch = random.random() < 0.3
+        shoot = True
+        dash = random.random() < 0.05
+
+        target_keys = set()
+        if move:
+            target_keys.add(move)
+        if crouch:
+            target_keys.add("down")
+        if shoot:
+            target_keys.add("s")
+
+        update_held_keys(target_keys)
+
+        if dash:
+            pydirectinput.press("shift")
+
+        # -------- LOGGING --------
+        if step % FRAME_SAVE_INTERVAL == 0:
+            frame_path = os.path.join(
+                frames_dir, f"ep{episode}_frame_{step:06d}.png"
+            )
+            cv2.imwrite(frame_path, img_small)
+
+            csv_writer.writerow(
+                [episode, step, move, crouch, shoot, dash, current_hp, time.time()]
+            )
+
+        if cv2.waitKey(1) & 0xFF == ord("q"):
+            raise KeyboardInterrupt
+
+        time.sleep(STEP_DELAY)
+        step += 1
 
 
-            if current_hp < last_hp:
-                print("Damage taken!")
+# ============================================================
+# MAIN
+# ============================================================
 
-            if current_hp == 0 and last_hp != 0:
-                print("Episode finished (HP reached 0)")
+def main():
+    cfg = load_config()
+    templates = load_hp_templates()
 
-            last_hp = current_hp
+    hp_region = {"top": 990, "left": 80, "width": 120, "height": 60}
+    progress_region = {"top": 100, "left": 500, "width": 900, "height": 600}
 
-            print("HP detected:", current_hp, "score:", round(score, 3))
+    frames_dir, progress_dir, csv_file, csv_writer = setup_logging(cfg["run_name"])
 
-            # -------- DEATH SAFETY --------
-            if current_hp == 0:
-                print("DEAD detected - stopping inputs")
-                release_all_keys()
-                time.sleep(STEP_DELAY)
-                step += 1
-                continue
+    print("Switch to Cuphead in 5 seconds...")
+    time.sleep(5)
 
-            hp_display = cv2.resize(hp_gray, (240, 480), interpolation=cv2.INTER_NEAREST)
-            cv2.imshow("HP View", hp_display)
+    print("Starting first episode (initial Enter)...")
+    press_enter()
+    time.sleep(3.6)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+    with mss.mss() as sct:
+        monitor = sct.monitors[1]
 
-            # -------- RANDOM POLICY --------
-            move = random.choice(["left", "right", None])
-            crouch = random.random() < 0.3
-            shoot = True
-            dash = random.random() < 0.05
+        try:
+            for episode in range(1, cfg["num_episodes"] + 1):
+                print(f"\n=== Episode {episode}/{cfg['num_episodes']} ===")
 
-            target_keys = set()
+                run_episode(
+                    episode,
+                    cfg,
+                    sct,
+                    monitor,
+                    templates,
+                    frames_dir,
+                    progress_dir,
+                    csv_writer,
+                    hp_region,
+                    progress_region
+                )
 
-            if move:
-                target_keys.add(move)
+            print("\nAll episodes finished.")
 
-            if crouch:
-                target_keys.add("down")
+        except KeyboardInterrupt:
+            print("\nInterrupted by user.")
 
-            if shoot:
-                target_keys.add("s")
+        finally:
+            release_all_keys()
+            csv_file.close()
+            cv2.destroyAllWindows()
 
-            update_held_keys(target_keys)
 
-            if shoot:
-                pydirectinput.keyDown("s")
-
-            if dash:
-                pydirectinput.press("shift")
-
-            # -------- LOGGING --------
-            if step % FRAME_SAVE_INTERVAL == 0:
-                frame_path = os.path.join(frames_dir, f"frame_{step:06d}.png")
-                cv2.imwrite(frame_path, img_small)
-                csv_writer.writerow([step, move, crouch, shoot, dash, time.time()])
-
-            time.sleep(STEP_DELAY)
-            step += 1
-
-    finally:
-        print("Total steps:", step)
-        release_all_keys()
-        csv_file.close()
-        cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()

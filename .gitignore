@@ -1,6 +1,9 @@
 venv/
-logs/
+logs/*
+logs/debug/*
 __pycache__/
 *.pyc
 .DS_Store
 .env
+
+!logs/debug/

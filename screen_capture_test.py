@@ -25,7 +25,7 @@ img_small = cv2.resize(img_gray, (320, 180))
 cv2.imwrite("logs/debug/full_observation_320x180.png", img_small)
 
 # -------- HP REGION --------
-hp_region = {"top": 1000, "left": 30, "width": 120, "height": 60}
+hp_region = {"top": 1009, "left": 113, "width": 23, "height": 32}
 
 with mss.mss() as sct:
     hp_screenshot = sct.grab(hp_region)
