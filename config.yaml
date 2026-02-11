@@ -2,4 +2,4 @@ run_name: test_run
 step_delay: 0.05
 run_duration: 15.0
 frame_save_interval: 4
-num_episodes: 2
+num_episodes: 1

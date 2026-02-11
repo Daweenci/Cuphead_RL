@@ -7,6 +7,7 @@ import random
 import os
 import csv
 import yaml
+import damage_tracker
 
 
 # ============================================================
@@ -25,6 +26,23 @@ def load_config(path="config.yaml"):
         cfg["num_episodes"]
     )
     return cfg
+
+
+# ============================================================
+# DAMAGE CARD TEMPLATE HANDLING
+# ============================================================
+
+def load_damage_templates():
+    card_fill_template = cv2.imread("templates/card_fill.png", cv2.IMREAD_GRAYSCALE)
+    card_front_template = cv2.imread("templates/card_front.png", cv2.IMREAD_GRAYSCALE)
+
+    if card_fill_template is None:
+        raise ValueError("card_fill.png not found")
+
+    if card_front_template is None:
+        raise ValueError("card_front.png not found")
+
+    return card_fill_template, card_front_template
 
 
 # ============================================================
@@ -119,7 +137,7 @@ def setup_logging(run_name):
     csv_file = open(os.path.join(run_dir, "actions.csv"), "w", newline="")
     csv_writer = csv.writer(csv_file)
     csv_writer.writerow(
-        ["episode", "step", "move", "crouch", "shoot", "dash", "hp", "time"]
+        ["episode", "step", "move", "crouch", "shoot", "dash", "hp", "damage_reward", "time"]
     )
 
     return frames_dir, progress_dir, csv_file, csv_writer
@@ -135,12 +153,32 @@ def run_episode(
     sct,
     monitor,
     templates,
+    damage_templates,
+    card_regions,
     frames_dir,
     progress_dir,
     csv_writer,
     hp_region,
     progress_region
 ):
+
+    card_fill_template, card_front_template = damage_templates
+    first_card_region, second_card_region = card_regions
+
+    episode_debug_path = os.path.join(
+        progress_dir,
+        f"damage_tracking_episode_{episode}"
+    )
+
+    damage_tracker_instance = damage_tracker.DamageTracker(
+        card_fill_template,
+        card_front_template,
+        first_card_region,
+        second_card_region,
+        debug=True,
+        debug_base_path=episode_debug_path
+    )
+
     STEP_DELAY = cfg["step_delay"]
     FRAME_SAVE_INTERVAL = cfg["frame_save_interval"]
 
@@ -182,7 +220,20 @@ def run_episode(
         else:
             current_hp = last_hp
 
-        print(f"HP: {current_hp} | score: {round(score, 3)}")
+        #print(f"HP: {current_hp} | score: {round(score, 3)}")
+
+        # -------- DAMAGE TRACKING --------
+        damage_reward, ult_ready = damage_tracker_instance.update(sct)
+        damage_reward = damage_reward or 0.0
+
+
+        if damage_reward > 0:
+            print(f"Damage reward: {round(damage_reward, 4)}")
+
+        if ult_ready:
+            print("ULT READY → pressing super")
+            pydirectinput.press("d")  # ult key
+            damage_tracker_instance.reset()
 
         # -------- DEATH --------
         if current_hp == 0:
@@ -234,7 +285,7 @@ def run_episode(
             cv2.imwrite(frame_path, img_small)
 
             csv_writer.writerow(
-                [episode, step, move, crouch, shoot, dash, current_hp, time.time()]
+                [episode, step, move, crouch, shoot, dash, current_hp, damage_reward, time.time()]
             )
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -254,6 +305,15 @@ def main():
 
     hp_region = {"top": 990, "left": 80, "width": 120, "height": 60}
     progress_region = {"top": 100, "left": 500, "width": 900, "height": 600}
+
+    card_fill_template, card_front_template = load_damage_templates()
+
+    first_card_region = {"top": 1008, "left": 163, "width": 24, "height": 44}
+    second_card_region = {"top": 1008, "left": 190, "width": 24, "height": 44}
+
+    damage_templates = (card_fill_template, card_front_template)
+    card_regions = (first_card_region, second_card_region)
+
 
     frames_dir, progress_dir, csv_file, csv_writer = setup_logging(cfg["run_name"])
 
@@ -277,12 +337,15 @@ def main():
                     sct,
                     monitor,
                     templates,
+                    damage_templates,
+                    card_regions,
                     frames_dir,
                     progress_dir,
                     csv_writer,
                     hp_region,
                     progress_region
                 )
+
 
             print("\nAll episodes finished.")
 
