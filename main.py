@@ -29,23 +29,6 @@ def load_config(path="config.yaml"):
 
 
 # ============================================================
-# DAMAGE CARD TEMPLATE HANDLING
-# ============================================================
-
-def load_damage_templates():
-    card_fill_template = cv2.imread("templates/card_fill.png", cv2.IMREAD_GRAYSCALE)
-    card_front_template = cv2.imread("templates/card_front.png", cv2.IMREAD_GRAYSCALE)
-
-    if card_fill_template is None:
-        raise ValueError("card_fill.png not found")
-
-    if card_front_template is None:
-        raise ValueError("card_front.png not found")
-
-    return card_fill_template, card_front_template
-
-
-# ============================================================
 # HP TEMPLATE HANDLING
 # ============================================================
 
@@ -153,8 +136,11 @@ def run_episode(
     sct,
     monitor,
     templates,
-    damage_templates,
-    card_regions,
+    first_left_region,
+    first_right_region,
+    second_left_region,
+    front_region,
+    card_front_template,
     frames_dir,
     progress_dir,
     csv_writer,
@@ -162,21 +148,12 @@ def run_episode(
     progress_region
 ):
 
-    card_fill_template, card_front_template = damage_templates
-    first_card_region, second_card_region = card_regions
-
-    episode_debug_path = os.path.join(
-        progress_dir,
-        f"damage_tracking_episode_{episode}"
-    )
-
     damage_tracker_instance = damage_tracker.DamageTracker(
-        card_fill_template,
-        card_front_template,
-        first_card_region,
-        second_card_region,
-        debug=True,
-        debug_base_path=episode_debug_path
+        first_left_region,
+        first_right_region,
+        second_left_region,
+        front_region,
+        card_front_template
     )
 
     STEP_DELAY = cfg["step_delay"]
@@ -214,35 +191,28 @@ def run_episode(
             if now - last_damage_time > DAMAGE_COOLDOWN:
                 current_hp = last_hp - 1
                 last_damage_time = now
-                print("Damage confirmed")
             else:
                 current_hp = last_hp
         else:
             current_hp = last_hp
 
-        #print(f"HP: {current_hp} | score: {round(score, 3)}")
-
         # -------- DAMAGE TRACKING --------
         damage_reward, ult_ready = damage_tracker_instance.update(sct)
         damage_reward = damage_reward or 0.0
-
 
         if damage_reward > 0:
             print(f"Damage reward: {round(damage_reward, 4)}")
 
         if ult_ready:
             print("ULT READY → pressing super")
-            pydirectinput.press("d")  # ult key
+            pydirectinput.press("d")
             damage_tracker_instance.reset()
 
         # -------- DEATH --------
         if current_hp == 0:
-            print("DEAD - ending episode")
             release_all_keys()
-
             time.sleep(EPISODE_END_WAIT)
 
-            # -------- PROGRESS SCREENSHOT (RESTORED) --------
             progress_screenshot = sct.grab(progress_region)
             progress_img = np.array(progress_screenshot)
             progress_gray = cv2.cvtColor(progress_img, cv2.COLOR_BGRA2GRAY)
@@ -306,14 +276,23 @@ def main():
     hp_region = {"top": 990, "left": 80, "width": 120, "height": 60}
     progress_region = {"top": 100, "left": 500, "width": 900, "height": 600}
 
-    card_fill_template, card_front_template = load_damage_templates()
+    # -------- CARD BAR COORDINATES --------
 
-    first_card_region = {"top": 1008, "left": 163, "width": 24, "height": 44}
-    second_card_region = {"top": 1008, "left": 190, "width": 24, "height": 44}
+    first_left_region = {"top": 1008, "left": 163, "width": 4, "height": 44}
+    first_right_region = {"top": 1008, "left": 183, "width": 4, "height": 44}
+    second_left_region = {"top": 1008, "left": 190, "width": 4, "height": 44}
 
-    damage_templates = (card_fill_template, card_front_template)
-    card_regions = (first_card_region, second_card_region)
+    # -------- FRONT TEMPLATE + REGION --------
 
+    front_region = {"top": 1008, "left": 160, "width": 60, "height": 44}
+
+    card_front_template = cv2.imread(
+        "templates/card_front.png",
+        cv2.IMREAD_GRAYSCALE
+    )
+
+    if card_front_template is None:
+        raise ValueError("card_front.png not found")
 
     frames_dir, progress_dir, csv_file, csv_writer = setup_logging(cfg["run_name"])
 
@@ -337,15 +316,17 @@ def main():
                     sct,
                     monitor,
                     templates,
-                    damage_templates,
-                    card_regions,
+                    first_left_region,
+                    first_right_region,
+                    second_left_region,
+                    front_region,
+                    card_front_template,
                     frames_dir,
                     progress_dir,
                     csv_writer,
                     hp_region,
                     progress_region
                 )
-
 
             print("\nAll episodes finished.")
 

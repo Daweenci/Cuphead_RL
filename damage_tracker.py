@@ -1,158 +1,175 @@
 import cv2
 import numpy as np
-import os
 
 
 class DamageTracker:
     def __init__(
         self,
-        card_fill_template,
-        card_front_template,
-        first_card_region,
-        second_card_region,
+        first_left_region,
+        first_right_region,
+        second_left_region,
+        front_region,
+        front_template,
         num_cards=5,
-        match_method=cv2.TM_CCOEFF_NORMED,
         ult_threshold=0.95,
-        growth_threshold=0.0,
-        debug=False,
-        debug_base_path=None,
+        reward_factor=1.0,
+        front_match_threshold=0.90,
     ):
         """
-        card_fill_template: template for a filled card (used for growth signal)
-        card_front_template: template for glowing super-ready card
-        first_card_region / second_card_region:
+        first_left_region:
+        first_right_region:
+        second_left_region:
+        front_region:
             dict with keys: top, left, width, height
+
+        front_template:
+            grayscale template of glowing ult-ready front
+
+        ult_threshold:
+            fill ratio threshold for last bar
+
+        reward_factor:
+            scaling factor for RL reward
+
+        front_match_threshold:
+            template match threshold for ult confirmation
         """
 
-        self.card_fill_template = card_fill_template
-        self.card_front_template = card_front_template
-        self.match_method = match_method
-        self.ult_threshold = ult_threshold
-        self.growth_threshold = growth_threshold
         self.num_cards = num_cards
-        self.debug = debug
-        self.debug_base_path = debug_base_path
-        self.frame_index = 0
+        self.ult_threshold = ult_threshold
+        self.reward_factor = reward_factor
+        self.front_match_threshold = front_match_threshold
 
-        # Compute spacing between cards
-        dx = second_card_region["left"] - first_card_region["left"]
+        self.front_region = front_region
+        self.front_template = front_template
 
-        self.card_regions = []
+        # Abstand zwischen Karten berechnen
+        dx = second_left_region["left"] - first_left_region["left"]
+
+        # Balken-Regionen berechnen
+        self.left_regions = []
+        self.right_regions = []
+
         for i in range(num_cards):
-            region = {
-                "top": first_card_region["top"],
-                "left": first_card_region["left"] + i * dx,
-                "width": first_card_region["width"],
-                "height": first_card_region["height"],
-            }
-            self.card_regions.append(region)
+            self.left_regions.append({
+                "top": first_left_region["top"],
+                "left": first_left_region["left"] + i * dx,
+                "width": first_left_region["width"],
+                "height": first_left_region["height"],
+            })
 
-        # Start below threshold
-        self.stored_scores = [-1.0 for _ in range(num_cards)]
+            self.right_regions.append({
+                "top": first_right_region["top"],
+                "left": first_right_region["left"] + i * dx,
+                "width": first_right_region["width"],
+                "height": first_right_region["height"],
+            })
+
+        # gespeicherter Fortschritt pro Karte
+        self.stored_fill = [0.0 for _ in range(num_cards)]
 
     # ==========================================================
-    # Internal matching
+    # Weiß-Maskierung (HSV)
     # ==========================================================
 
-    def _match(self, gray_img, template):
-        result = cv2.matchTemplate(gray_img, template, self.match_method)
+    def _white_mask(self, bgr_img):
+        hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
+
+        lower_white = np.array([0, 0, 200])
+        upper_white = np.array([180, 40, 255])
+
+        mask = cv2.inRange(hsv, lower_white, upper_white)
+        return mask
+
+    # ==========================================================
+    # Füllstand einer Balkenregion berechnen
+    # ==========================================================
+
+    def _compute_fill_ratio(self, mask):
+        height, width = mask.shape
+        filled_rows = 0
+
+        # Von unten nach oben zählen
+        for row in reversed(range(height)):
+            white_pixels = np.count_nonzero(mask[row])
+
+            if white_pixels >= width * 0.5:
+                filled_rows += 1
+            else:
+                break
+
+        return filled_rows / height
+
+    # ==========================================================
+    # Template Matching für Ult-Front
+    # ==========================================================
+
+    def _match_front(self, gray_img):
+        result = cv2.matchTemplate(
+            gray_img,
+            self.front_template,
+            cv2.TM_CCOEFF_NORMED
+        )
         return float(result.max())
 
     # ==========================================================
-    # Update per frame
+    # Frame Update
     # ==========================================================
 
     def update(self, sct):
-        """
-        Call once per frame.
-
-        Returns:
-            reward (float)
-            ult_ready (bool)
-        """
-
-        frame_folder = None
-
-        if self.debug and self.debug_base_path:
-            frame_folder = os.path.join(
-                self.debug_base_path,
-                f"frame_{self.frame_index:06d}"
-            )
-            os.makedirs(frame_folder, exist_ok=True)
-
         total_reward = 0.0
         ult_ready = False
 
-        for i, region in enumerate(self.card_regions):
+        # ----------------------------------------
+        # 1) Balken-Fill berechnen
+        # ----------------------------------------
 
-            screenshot = sct.grab(region)
-            img = np.array(screenshot)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+        for i in range(self.num_cards):
 
-            if frame_folder:
-                cv2.imwrite(
-                    os.path.join(frame_folder, f"card_{i}.png"),
-                    img
-                )
+            # Linker Balken
+            left_img = np.array(sct.grab(self.left_regions[i]))
+            left_mask = self._white_mask(left_img)
+            left_fill = self._compute_fill_ratio(left_mask)
 
-            score = self._match(gray, self.card_fill_template)
+            # Rechter Balken
+            right_img = np.array(sct.grab(self.right_regions[i]))
+            right_mask = self._white_mask(right_img)
+            right_fill = self._compute_fill_ratio(right_mask)
 
-            # =========================
-            # Growth logic (fixed)
-            # =========================
+            # Sicherheitslogik: kleinerer Wert zählt
+            fill_ratio = min(left_fill, right_fill)
 
-            # Ignore low scores completely
-            if score < self.growth_threshold:
-                continue
+            # Sequentielle Logik:
+            # Karte i darf nur wachsen wenn Karte i-1 voll ist
+            if i > 0:
+                if self.stored_fill[i - 1] < self.ult_threshold:
+                    continue
 
-            # First activation (avoid huge artificial delta)
-            if self.stored_scores[i] < self.growth_threshold:
-                self.stored_scores[i] = score
-                continue
+            # Monotonic clamp (kein Rückgang erlaubt)
+            if fill_ratio > self.stored_fill[i]:
+                delta = fill_ratio - self.stored_fill[i]
+                total_reward += delta * self.reward_factor
+                self.stored_fill[i] = fill_ratio
 
-            # Normal monotonic increase
-            if score > self.stored_scores[i]:
-                delta = score - self.stored_scores[i]
-                total_reward += delta
-                self.stored_scores[i] = score
+        # ----------------------------------------
+        # 2) Ult Ready Check (letzte Karte + Front Template)
+        # ----------------------------------------
 
-        # =========================
-        # Ult detection (last card only)
-        # =========================
+        if self.stored_fill[-1] >= self.ult_threshold:
 
-        last_index = self.num_cards - 1
-        last_score = self.stored_scores[last_index]
+            front_img = np.array(sct.grab(self.front_region))
+            front_gray = cv2.cvtColor(front_img, cv2.COLOR_BGR2GRAY)
 
-        if last_score >= self.ult_threshold:
+            front_score = self._match_front(front_gray)
 
-            region = self.card_regions[last_index]
-            screenshot = sct.grab(region)
-            img = np.array(screenshot)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-
-            front_score = self._match(gray, self.card_front_template)
-
-            if front_score >= self.ult_threshold:
+            if front_score >= self.front_match_threshold:
                 ult_ready = True
-
-        # =========================
-        # Debug CSV
-        # =========================
-
-        if frame_folder:
-            csv_path = os.path.join(frame_folder, "data.csv")
-            with open(csv_path, "w") as f:
-                f.write("card_index,stored_score\n")
-                for idx, stored in enumerate(self.stored_scores):
-                    f.write(f"{idx},{stored}\n")
-
-        self.frame_index += 1
 
         return total_reward, ult_ready
 
     # ==========================================================
-    # Reset after ult
+    # Reset nach Ult
     # ==========================================================
 
     def reset(self):
-        self.stored_scores = [-1.0 for _ in range(self.num_cards)]
+        self.stored_fill = [0.0 for _ in range(self.num_cards)]
