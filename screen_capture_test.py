@@ -49,26 +49,25 @@ with mss.mss() as sct:
 
     # First card (guess values)
     card1_region = {
-        "top": 1008,
-        "left": 163,
-        "width": 24,
-        "height": 44
+        "top": 1014,
+        "left": 172,
+        "width": 4,
+        "height": 31
     }
 
     # Second card (guess values)
     card2_region = {
-        "top": 1008,
-        "left": 190,
-        "width": 24,
-        "height": 44
+        "top": 1014,
+        "left": 199,       
+        "width": 4,
+        "height": 31
     }
 
     # Optional: whole card bar (for overview)
-    cards_bar_region = {
-        "top": 1008,
-        "left": 163,
-        "width": 200,
-        "height": 44
+    cards_bar_region = {"top": 1012, 
+        "left": 274,
+        "width": 18, 
+        "height": 34
     }
 
     # Capture Card 1

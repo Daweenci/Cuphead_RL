@@ -5,171 +5,170 @@ import numpy as np
 class DamageTracker:
     def __init__(
         self,
-        first_left_region,
-        first_right_region,
-        second_left_region,
-        front_region,
-        front_template,
+        first_card_region,
+        second_card_region,
+        ult_region,          # large region matching card_front_1
+        ult_templates,       # list of 5 grayscale templates
+        ult_offsets,         # list of 5 {"left": x, "top": y}
         num_cards=5,
         ult_threshold=0.95,
         reward_factor=1.0,
         front_match_threshold=0.90,
     ):
-        """
-        first_left_region:
-        first_right_region:
-        second_left_region:
-        front_region:
-            dict with keys: top, left, width, height
-
-        front_template:
-            grayscale template of glowing ult-ready front
-
-        ult_threshold:
-            fill ratio threshold for last bar
-
-        reward_factor:
-            scaling factor for RL reward
-
-        front_match_threshold:
-            template match threshold for ult confirmation
-        """
 
         self.num_cards = num_cards
         self.ult_threshold = ult_threshold
         self.reward_factor = reward_factor
         self.front_match_threshold = front_match_threshold
 
-        self.front_region = front_region
-        self.front_template = front_template
+        # --------------------------------------------------
+        # Card bar geometry
+        # --------------------------------------------------
 
-        # Abstand zwischen Karten berechnen
-        dx = second_left_region["left"] - first_left_region["left"]
+        self.card_spacing = (
+            second_card_region["left"] - first_card_region["left"]
+        )
 
-        # Balken-Regionen berechnen
-        self.left_regions = []
-        self.right_regions = []
+        self.bar_width = first_card_region["width"]
+        self.bar_height = first_card_region["height"]
+        self.top = first_card_region["top"]
 
-        for i in range(num_cards):
-            self.left_regions.append({
-                "top": first_left_region["top"],
-                "left": first_left_region["left"] + i * dx,
-                "width": first_left_region["width"],
-                "height": first_left_region["height"],
-            })
+        first_left = first_card_region["left"]
+        last_right = first_left + (num_cards - 1) * self.card_spacing + self.bar_width
 
-            self.right_regions.append({
-                "top": first_right_region["top"],
-                "left": first_right_region["left"] + i * dx,
-                "width": first_right_region["width"],
-                "height": first_right_region["height"],
-            })
+        self.full_region = {
+            "top": self.top,
+            "left": first_left,
+            "width": last_right - first_left,
+            "height": self.bar_height
+        }
 
-        # gespeicherter Fortschritt pro Karte
         self.stored_fill = [0.0 for _ in range(num_cards)]
 
-    # ==========================================================
-    # Weiß-Maskierung (HSV)
-    # ==========================================================
+        # --------------------------------------------------
+        # Ult detection setup
+        # --------------------------------------------------
 
-    def _white_mask(self, bgr_img):
+        self.ult_region = ult_region
+        self.ult_templates = ult_templates
+        self.ult_offsets = ult_offsets
+
+        if len(self.ult_templates) != 5 or len(self.ult_offsets) != 5:
+            raise ValueError("Provide exactly 5 ult templates and 5 ult offsets.")
+
+        for t in self.ult_templates:
+            if t is None:
+                raise ValueError("One or more ult templates failed to load.")
+
+    # ----------------------------------------------------------
+    # Orange fill mask
+    # ----------------------------------------------------------
+
+    def _fill_mask(self, bgr_img):
         hsv = cv2.cvtColor(bgr_img, cv2.COLOR_BGR2HSV)
 
-        lower_white = np.array([0, 0, 200])
-        upper_white = np.array([180, 40, 255])
+        lower = np.array([8, 135, 180])
+        upper = np.array([26, 255, 255])
 
-        mask = cv2.inRange(hsv, lower_white, upper_white)
+        mask = cv2.inRange(hsv, lower, upper)
+
+        # Vertical stabilization
+        kernel = np.ones((3, 1), np.uint8)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+
         return mask
 
-    # ==========================================================
-    # Füllstand einer Balkenregion berechnen
-    # ==========================================================
+    # ----------------------------------------------------------
 
     def _compute_fill_ratio(self, mask):
         height, width = mask.shape
         filled_rows = 0
 
-        # Von unten nach oben zählen
         for row in reversed(range(height)):
             white_pixels = np.count_nonzero(mask[row])
-
-            if white_pixels >= width * 0.5:
+            if white_pixels >= width * 0.6:
                 filled_rows += 1
             else:
                 break
 
         return filled_rows / height
 
-    # ==========================================================
-    # Template Matching für Ult-Front
-    # ==========================================================
+    # ----------------------------------------------------------
+    # Offset-based ult detection
+    # ----------------------------------------------------------
 
-    def _match_front(self, gray_img):
-        result = cv2.matchTemplate(
-            gray_img,
-            self.front_template,
-            cv2.TM_CCOEFF_NORMED
-        )
-        return float(result.max())
+    def _check_ult(self, sct):
 
-    # ==========================================================
-    # Frame Update
-    # ==========================================================
+        full_img = np.array(sct.grab(self.ult_region))
+        gray_full = cv2.cvtColor(full_img, cv2.COLOR_BGR2GRAY)
+
+        for template, offset in zip(self.ult_templates, self.ult_offsets):
+
+            th, tw = template.shape
+
+            x1 = offset["left"]
+            y1 = offset["top"]
+            x2 = x1 + tw
+            y2 = y1 + th
+
+            # Safety bounds check
+            if x2 > gray_full.shape[1] or y2 > gray_full.shape[0]:
+                continue
+
+            cropped = gray_full[y1:y2, x1:x2]
+
+            if cropped.shape != template.shape:
+                continue
+
+            result = cv2.matchTemplate(
+                cropped,
+                template,
+                cv2.TM_CCOEFF_NORMED
+            )
+
+            score = float(result.max())
+
+            if score >= self.front_match_threshold:
+                return True
+
+        return False
+
+    # ----------------------------------------------------------
 
     def update(self, sct):
+
         total_reward = 0.0
         ult_ready = False
 
-        # ----------------------------------------
-        # 1) Balken-Fill berechnen
-        # ----------------------------------------
+        full_img = np.array(sct.grab(self.full_region))
 
         for i in range(self.num_cards):
 
-            # Linker Balken
-            left_img = np.array(sct.grab(self.left_regions[i]))
-            left_mask = self._white_mask(left_img)
-            left_fill = self._compute_fill_ratio(left_mask)
+            base_x = i * self.card_spacing
 
-            # Rechter Balken
-            right_img = np.array(sct.grab(self.right_regions[i]))
-            right_mask = self._white_mask(right_img)
-            right_fill = self._compute_fill_ratio(right_mask)
+            card_slice = full_img[:, base_x: base_x + self.bar_width]
 
-            # Sicherheitslogik: kleinerer Wert zählt
-            fill_ratio = min(left_fill, right_fill)
+            mask = self._fill_mask(card_slice)
+            fill_ratio = self._compute_fill_ratio(mask)
 
-            # Sequentielle Logik:
-            # Karte i darf nur wachsen wenn Karte i-1 voll ist
+            # Sequential gating
             if i > 0:
                 if self.stored_fill[i - 1] < self.ult_threshold:
                     continue
 
-            # Monotonic clamp (kein Rückgang erlaubt)
+            # Monotonic increase only
             if fill_ratio > self.stored_fill[i]:
                 delta = fill_ratio - self.stored_fill[i]
                 total_reward += delta * self.reward_factor
                 self.stored_fill[i] = fill_ratio
 
-        # ----------------------------------------
-        # 2) Ult Ready Check (letzte Karte + Front Template)
-        # ----------------------------------------
-
+        # Ult detection
         if self.stored_fill[-1] >= self.ult_threshold:
-
-            front_img = np.array(sct.grab(self.front_region))
-            front_gray = cv2.cvtColor(front_img, cv2.COLOR_BGR2GRAY)
-
-            front_score = self._match_front(front_gray)
-
-            if front_score >= self.front_match_threshold:
-                ult_ready = True
+            ult_ready = self._check_ult(sct)
 
         return total_reward, ult_ready
 
-    # ==========================================================
-    # Reset nach Ult
-    # ==========================================================
+    # ----------------------------------------------------------
 
     def reset(self):
         self.stored_fill = [0.0 for _ in range(self.num_cards)]

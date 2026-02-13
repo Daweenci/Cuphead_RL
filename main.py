@@ -119,9 +119,20 @@ def setup_logging(run_name):
 
     csv_file = open(os.path.join(run_dir, "actions.csv"), "w", newline="")
     csv_writer = csv.writer(csv_file)
-    csv_writer.writerow(
-        ["episode", "step", "move", "crouch", "shoot", "dash", "hp", "damage_reward", "time"]
-    )
+
+    csv_writer.writerow([
+        "episode",
+        "step",
+        "move",
+        "crouch",
+        "shoot",
+        "dash",
+        "hp",
+        "damage_reward",
+        "damage_event",
+        "ult_event",
+        "time"
+    ])
 
     return frames_dir, progress_dir, csv_file, csv_writer
 
@@ -136,11 +147,11 @@ def run_episode(
     sct,
     monitor,
     templates,
-    first_left_region,
-    first_right_region,
-    second_left_region,
-    front_region,
-    card_front_template,
+    first_card_region,
+    second_card_region,
+    ult_region,
+    ult_templates,
+    ult_offsets,
     frames_dir,
     progress_dir,
     csv_writer,
@@ -149,11 +160,11 @@ def run_episode(
 ):
 
     damage_tracker_instance = damage_tracker.DamageTracker(
-        first_left_region,
-        first_right_region,
-        second_left_region,
-        front_region,
-        card_front_template
+        first_card_region,
+        second_card_region,
+        ult_region,
+        ult_templates,
+        ult_offsets
     )
 
     STEP_DELAY = cfg["step_delay"]
@@ -169,7 +180,7 @@ def run_episode(
     last_damage_time = 0.0
 
     while True:
-        # -------- OBSERVATION --------
+
         screenshot = sct.grab(monitor)
         img = np.array(screenshot)
 
@@ -179,7 +190,6 @@ def run_episode(
         display = cv2.resize(img_small, (640, 360), interpolation=cv2.INTER_NEAREST)
         cv2.imshow("Agent View", display)
 
-        # -------- HP DETECTION --------
         hp_screenshot = sct.grab(hp_region)
         hp_img = np.array(hp_screenshot)
         hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
@@ -196,19 +206,22 @@ def run_episode(
         else:
             current_hp = last_hp
 
-        # -------- DAMAGE TRACKING --------
         damage_reward, ult_ready = damage_tracker_instance.update(sct)
         damage_reward = damage_reward or 0.0
 
+        damage_event = False
+        ult_event = False
+
         if damage_reward > 0:
-            print(f"Damage reward: {round(damage_reward, 4)}")
+            damage_event = True
+            print(f"[EP {episode} | STEP {step}] DAMAGE DETECTED | Reward: {round(damage_reward, 4)}")
 
         if ult_ready:
-            print("ULT READY → pressing super")
+            ult_event = True
+            print(f"[EP {episode} | STEP {step}] ULT READY → PRESSING SUPER")
             pydirectinput.press("d")
             damage_tracker_instance.reset()
 
-        # -------- DEATH --------
         if current_hp == 0:
             release_all_keys()
             time.sleep(EPISODE_END_WAIT)
@@ -228,7 +241,6 @@ def run_episode(
 
         last_hp = current_hp
 
-        # -------- ACTION POLICY --------
         move = random.choice(["left", "right", None])
         crouch = random.random() < 0.3
         shoot = True
@@ -247,16 +259,25 @@ def run_episode(
         if dash:
             pydirectinput.press("shift")
 
-        # -------- LOGGING --------
         if step % FRAME_SAVE_INTERVAL == 0:
             frame_path = os.path.join(
                 frames_dir, f"ep{episode}_frame_{step:06d}.png"
             )
             cv2.imwrite(frame_path, img_small)
 
-            csv_writer.writerow(
-                [episode, step, move, crouch, shoot, dash, current_hp, damage_reward, time.time()]
-            )
+            csv_writer.writerow([
+                episode,
+                step,
+                move,
+                crouch,
+                shoot,
+                dash,
+                current_hp,
+                damage_reward,
+                damage_event,
+                ult_event,
+                time.time()
+            ])
 
         if cv2.waitKey(1) & 0xFF == ord("q"):
             raise KeyboardInterrupt
@@ -276,23 +297,26 @@ def main():
     hp_region = {"top": 990, "left": 80, "width": 120, "height": 60}
     progress_region = {"top": 100, "left": 500, "width": 900, "height": 600}
 
-    # -------- CARD BAR COORDINATES --------
+    first_card_region = {"top": 1013, "left": 172, "width": 4, "height": 32}
+    second_card_region = {"top": 1013, "left": 199, "width": 4, "height": 32}
 
-    first_left_region = {"top": 1008, "left": 163, "width": 4, "height": 44}
-    first_right_region = {"top": 1008, "left": 183, "width": 4, "height": 44}
-    second_left_region = {"top": 1008, "left": 190, "width": 4, "height": 44}
+    ult_region = {"top": 1012, "left": 274, "width": 40, "height": 40}
 
-    # -------- FRONT TEMPLATE + REGION --------
+    ult_templates = [
+        cv2.imread("templates/card_front_1.png", cv2.IMREAD_GRAYSCALE),
+        cv2.imread("templates/card_front_2.png", cv2.IMREAD_GRAYSCALE),
+        cv2.imread("templates/card_front_3.png", cv2.IMREAD_GRAYSCALE),
+        cv2.imread("templates/card_front_4.png", cv2.IMREAD_GRAYSCALE),
+        cv2.imread("templates/card_front_5.png", cv2.IMREAD_GRAYSCALE),
+    ]
 
-    front_region = {"top": 1008, "left": 160, "width": 60, "height": 44}
-
-    card_front_template = cv2.imread(
-        "templates/card_front.png",
-        cv2.IMREAD_GRAYSCALE
-    )
-
-    if card_front_template is None:
-        raise ValueError("card_front.png not found")
+    ult_offsets = [
+        {"left": 0, "top": 0},   # card_front_1
+        {"left": 5, "top": 5},
+        {"left": 8, "top": 8},
+        {"left": 5, "top": 5},
+        {"left": 2, "top": 2},
+    ]
 
     frames_dir, progress_dir, csv_file, csv_writer = setup_logging(cfg["run_name"])
 
@@ -316,11 +340,11 @@ def main():
                     sct,
                     monitor,
                     templates,
-                    first_left_region,
-                    first_right_region,
-                    second_left_region,
-                    front_region,
-                    card_front_template,
+                    first_card_region,
+                    second_card_region,
+                    ult_region,
+                    ult_templates,
+                    ult_offsets,
                     frames_dir,
                     progress_dir,
                     csv_writer,
