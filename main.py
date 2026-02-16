@@ -151,7 +151,7 @@ def run_episode(
     second_card_region,
     ult_region,
     ult_templates,
-    ult_offsets,
+    ult_crops,  
     frames_dir,
     progress_dir,
     csv_writer,
@@ -164,7 +164,7 @@ def run_episode(
         second_card_region,
         ult_region,
         ult_templates,
-        ult_offsets
+        ult_crops  
     )
 
     STEP_DELAY = cfg["step_delay"]
@@ -209,18 +209,19 @@ def run_episode(
         damage_reward, ult_ready = damage_tracker_instance.update(sct)
         damage_reward = damage_reward or 0.0
 
-        damage_event = False
-        ult_event = False
-
         if damage_reward > 0:
-            damage_event = True
-            print(f"[EP {episode} | STEP {step}] DAMAGE DETECTED | Reward: {round(damage_reward, 4)}")
+            print(f"[DAMAGE] Step {step} | Reward: {damage_reward:.4f}")
+
+        damage_event = damage_reward > 0
+        ult_event = False
 
         if ult_ready:
             ult_event = True
             print(f"[EP {episode} | STEP {step}] ULT READY → PRESSING SUPER")
-            pydirectinput.press("d")
-            damage_tracker_instance.reset()
+            pydirectinput.keyDown("d")
+            time.sleep(0.5)
+            pydirectinput.keyUp("d")
+            damage_tracker_instance.trigger_ult_lock()
 
         if current_hp == 0:
             release_all_keys()
@@ -310,12 +311,12 @@ def main():
         cv2.imread("templates/card_front_5.png", cv2.IMREAD_GRAYSCALE),
     ]
 
-    ult_offsets = [
-        {"left": 0, "top": 0},   # card_front_1
-        {"left": 5, "top": 5},
-        {"left": 8, "top": 8},
-        {"left": 5, "top": 5},
-        {"left": 2, "top": 2},
+    ult_crops = [
+        {"left": 0, "right": 0},
+        {"left": 7, "right": 1},
+        {"left": 8, "right": 3},
+        {"left": 8, "right": 2},
+        {"left": 4, "right": 0},
     ]
 
     frames_dir, progress_dir, csv_file, csv_writer = setup_logging(cfg["run_name"])
@@ -344,7 +345,7 @@ def main():
                     second_card_region,
                     ult_region,
                     ult_templates,
-                    ult_offsets,
+                    ult_crops,
                     frames_dir,
                     progress_dir,
                     csv_writer,

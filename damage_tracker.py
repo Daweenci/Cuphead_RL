@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import time
 
 
 class DamageTracker:
@@ -7,19 +8,23 @@ class DamageTracker:
         self,
         first_card_region,
         second_card_region,
-        ult_region,          # large region matching card_front_1
-        ult_templates,       # list of 5 grayscale templates
-        ult_offsets,         # list of 5 {"left": x, "top": y}
+        ult_region,
+        ult_templates,
+        ult_crops,
         num_cards=5,
-        ult_threshold=0.95,
+        ult_threshold=0.8,
         reward_factor=1.0,
-        front_match_threshold=0.90,
+        front_match_threshold=0.72,
+        ult_lock_duration=6.0,  # NEW
     ):
 
         self.num_cards = num_cards
         self.ult_threshold = ult_threshold
         self.reward_factor = reward_factor
         self.front_match_threshold = front_match_threshold
+        self.ult_lock_duration = ult_lock_duration
+
+        self.ult_lock_until = 0.0  # NEW
 
         # --------------------------------------------------
         # Card bar geometry
@@ -49,12 +54,12 @@ class DamageTracker:
         # Ult detection setup
         # --------------------------------------------------
 
+        if not (len(ult_templates) == 5 and len(ult_crops) == 5):
+            raise ValueError("Provide exactly 5 templates and 5 crop configs.")
+
         self.ult_region = ult_region
         self.ult_templates = ult_templates
-        self.ult_offsets = ult_offsets
-
-        if len(self.ult_templates) != 5 or len(self.ult_offsets) != 5:
-            raise ValueError("Provide exactly 5 ult templates and 5 ult offsets.")
+        self.ult_crops = ult_crops
 
         for t in self.ult_templates:
             if t is None:
@@ -72,7 +77,6 @@ class DamageTracker:
 
         mask = cv2.inRange(hsv, lower, upper)
 
-        # Vertical stabilization
         kernel = np.ones((3, 1), np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
@@ -94,7 +98,7 @@ class DamageTracker:
         return filled_rows / height
 
     # ----------------------------------------------------------
-    # Offset-based ult detection
+    # Ult detection
     # ----------------------------------------------------------
 
     def _check_ult(self, sct):
@@ -102,40 +106,73 @@ class DamageTracker:
         full_img = np.array(sct.grab(self.ult_region))
         gray_full = cv2.cvtColor(full_img, cv2.COLOR_BGR2GRAY)
 
-        for template, offset in zip(self.ult_templates, self.ult_offsets):
+        best_score = -1.0
+        best_index = -1
 
-            th, tw = template.shape
+        for idx, (template, crop) in enumerate(zip(self.ult_templates, self.ult_crops)):
 
-            x1 = offset["left"]
-            y1 = offset["top"]
-            x2 = x1 + tw
-            y2 = y1 + th
+            left = crop["left"]
+            right = crop["right"]
 
-            # Safety bounds check
-            if x2 > gray_full.shape[1] or y2 > gray_full.shape[0]:
-                continue
+            cropped_region = gray_full[:, left: gray_full.shape[1] - right]
 
-            cropped = gray_full[y1:y2, x1:x2]
-
-            if cropped.shape != template.shape:
+            if cropped_region.shape[0] < template.shape[0] or \
+            cropped_region.shape[1] < template.shape[1]:
+                print(f"[ULT DEBUG] Template {idx} skipped (size mismatch)")
                 continue
 
             result = cv2.matchTemplate(
-                cropped,
+                cropped_region,
                 template,
                 cv2.TM_CCOEFF_NORMED
             )
 
             score = float(result.max())
 
-            if score >= self.front_match_threshold:
-                return True
+            threshold = self.front_match_threshold
+            delta = score - threshold
+            percent_of_threshold = (score / threshold) * 100 if threshold > 0 else 0
+            """
+            print(
+                f"[ULT DEBUG] Template {idx} "
+                f"| score: {score:.4f} "
+                f"| threshold: {threshold:.2f} "
+                f"| delta: {delta:+.4f} "
+                f"| % of threshold: {percent_of_threshold:.1f}%"
+            )
+            """
+            if score > best_score:
+                best_score = score
+                best_index = idx
+        """
+        print(
+            f"[ULT DEBUG] Best template: {best_index} "
+            f"| score: {best_score:.4f} "
+            f"| threshold: {self.front_match_threshold:.2f} "
+            f"| delta: {best_score - self.front_match_threshold:+.4f}"
+        )
+        """
+        if best_score >= self.front_match_threshold:
+            print(f"[ULT DEBUG] >>> ULT DETECTED via template {best_index}")
+            return True
 
         return False
 
+
+
+    # ----------------------------------------------------------
+    # MAIN UPDATE
     # ----------------------------------------------------------
 
     def update(self, sct):
+
+        now = time.time()
+
+        # -----------------------------
+        # 1️⃣ LOCK PERIOD (NO REWARD)
+        # -----------------------------
+        if now < self.ult_lock_until:
+            return 0.0, False
 
         total_reward = 0.0
         ult_ready = False
@@ -145,30 +182,44 @@ class DamageTracker:
         for i in range(self.num_cards):
 
             base_x = i * self.card_spacing
-
             card_slice = full_img[:, base_x: base_x + self.bar_width]
 
             mask = self._fill_mask(card_slice)
             fill_ratio = self._compute_fill_ratio(mask)
 
-            # Sequential gating
             if i > 0:
                 if self.stored_fill[i - 1] < self.ult_threshold:
                     continue
 
-            # Monotonic increase only
             if fill_ratio > self.stored_fill[i]:
                 delta = fill_ratio - self.stored_fill[i]
                 total_reward += delta * self.reward_factor
                 self.stored_fill[i] = fill_ratio
 
-        # Ult detection
-        if self.stored_fill[-1] >= self.ult_threshold:
+        last_fill = self.stored_fill[-1]
+        threshold = self.ult_threshold
+        delta = last_fill - threshold
+        percent_of_threshold = (last_fill / threshold) * 100 if threshold > 0 else 0
+        """
+        print(
+            f"[FILL DEBUG] Last card fill: {last_fill:.4f} "
+            f"| threshold: {threshold:.2f} "
+            f"| delta: {delta:+.4f} "
+            f"| % of threshold: {percent_of_threshold:.1f}%"
+        )
+        """
+        if last_fill >= threshold:
+            print("[FILL DEBUG] >>> Fill threshold reached, checking ult template")
             ult_ready = self._check_ult(sct)
+
 
         return total_reward, ult_ready
 
     # ----------------------------------------------------------
+
+    def trigger_ult_lock(self):  # NEW
+        self.ult_lock_until = time.time() + self.ult_lock_duration
+        self.stored_fill = [0.0 for _ in range(self.num_cards)]
 
     def reset(self):
         self.stored_fill = [0.0 for _ in range(self.num_cards)]
