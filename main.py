@@ -298,8 +298,8 @@ def main():
     hp_region = {"top": 990, "left": 80, "width": 120, "height": 60}
     progress_region = {"top": 100, "left": 500, "width": 900, "height": 600}
 
-    first_card_region = {"top": 1013, "left": 172, "width": 4, "height": 32}
-    second_card_region = {"top": 1013, "left": 199, "width": 4, "height": 32}
+    first_card_region = {"top": 1014, "left": 172, "width": 4, "height": 34}
+    second_card_region = {"top": 1014, "left": 199, "width": 4, "height": 34}
 
     ult_region = {"top": 1012, "left": 274, "width": 40, "height": 40}
 
