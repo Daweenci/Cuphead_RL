@@ -34,6 +34,7 @@ def load_config(path="config.yaml"):
 
 def load_hp_templates():
     template_paths = {
+        5: ["templates/hp_5.png"],
         4: ["templates/hp_4.png"],
         3: ["templates/hp_3.png"],
         2: ["templates/hp_2.png"],
@@ -55,7 +56,7 @@ def load_hp_templates():
     return templates
 
 
-def detect_hp_from_template(hp_gray, templates):
+def detect_hp_from_template(hp_gray, templates, min_confidence=0.7):
     best_score = -1
     best_hp = None
 
@@ -67,6 +68,10 @@ def detect_hp_from_template(hp_gray, templates):
             if score > best_score:
                 best_score = score
                 best_hp = hp_value
+
+    # NEW: confidence check
+    if best_score < min_confidence:
+        return None, best_score
 
     return best_hp, best_score
 
@@ -175,8 +180,8 @@ def run_episode(
     EPISODE_START_WAIT = 3.6
 
     step = 0
-    last_hp = 4
-    current_hp = 4
+    last_hp = 5
+    current_hp = 5
     last_damage_time = 0.0
 
     while True:
@@ -201,6 +206,14 @@ def run_episode(
             if now - last_damage_time > DAMAGE_COOLDOWN:
                 current_hp = last_hp - 1
                 last_damage_time = now
+
+                print(
+                    f"[HP LOSS] Step {step} | "
+                    f"HP: {last_hp} → {current_hp} | "
+                    f"Detected: {detected_hp} | "
+                    f"Score: {score:.3f}"
+                )
+
             else:
                 current_hp = last_hp
         else:
@@ -210,7 +223,8 @@ def run_episode(
         damage_reward = damage_reward or 0.0
 
         if damage_reward > 0:
-            print(f"[DAMAGE] Step {step} | Reward: {damage_reward:.4f}")
+            #print(f"[DAMAGE] Step {step} | Reward: {damage_reward:.4f}")
+            print("")
 
         damage_event = damage_reward > 0
         ult_event = False

@@ -10,6 +10,12 @@ time.sleep(5)
 # Create logs folder
 os.makedirs("logs/debug", exist_ok=True)
 
+def grab_gray(sct, region):
+    """Grab region and convert BGRA -> Grayscale"""
+    img = np.array(sct.grab(region))
+    gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
+    return img, gray
+
 with mss.mss() as sct:
 
     # ============================================================
@@ -26,28 +32,23 @@ with mss.mss() as sct:
     cv2.imwrite("logs/debug/full_observation_320x180.png", img_small)
 
     # ============================================================
-    # HP REGION (existing)
+    # HP REGION
     # ============================================================
 
     hp_region = {"top": 1009, "left": 113, "width": 23, "height": 32}
 
-    hp_screenshot = sct.grab(hp_region)
-    hp_img = np.array(hp_screenshot)
+    hp_color, hp_gray = grab_gray(sct, hp_region)
 
-    cv2.imwrite("logs/debug/hp_raw_color.png", hp_img)
-
-    hp_gray = cv2.cvtColor(hp_img, cv2.COLOR_BGRA2GRAY)
+    cv2.imwrite("logs/debug/hp_raw_color.png", hp_color)
     cv2.imwrite("logs/debug/hp_gray.png", hp_gray)
 
     _, hp_thresh = cv2.threshold(hp_gray, 150, 255, cv2.THRESH_BINARY)
     cv2.imwrite("logs/debug/hp_threshold.png", hp_thresh)
 
     # ============================================================
-    # CARD REGIONS (NEW)
-    # Adjust these values manually
+    # CARD REGIONS
     # ============================================================
 
-    # First card (guess values)
     card1_region = {
         "top": 1014,
         "left": 172,
@@ -55,31 +56,28 @@ with mss.mss() as sct:
         "height": 31
     }
 
-    # Second card (guess values)
     card2_region = {
         "top": 1014,
-        "left": 199,       
+        "left": 199,
         "width": 4,
         "height": 31
     }
 
-    # Optional: whole card bar (for overview)
-    cards_bar_region = {"top": 1012, 
-        "left": 274,
-        "width": 18, 
-        "height": 34
-    }
-
     # Capture Card 1
-    card1_img = np.array(sct.grab(card1_region))
-    cv2.imwrite("logs/debug/card1_raw_color.png", card1_img)
+    card1_color, card1_gray = grab_gray(sct, card1_region)
+    cv2.imwrite("logs/debug/card1_raw_color.png", card1_color)
+    cv2.imwrite("logs/debug/card1_gray.png", card1_gray)
 
     # Capture Card 2
-    card2_img = np.array(sct.grab(card2_region))
-    cv2.imwrite("logs/debug/card2_raw_color.png", card2_img)
+    card2_color, card2_gray = grab_gray(sct, card2_region)
+    cv2.imwrite("logs/debug/card2_raw_color.png", card2_color)
+    cv2.imwrite("logs/debug/card2_gray.png", card2_gray)
 
-    # Capture whole card bar (optional debug)
-    cards_bar_img = np.array(sct.grab(cards_bar_region))
-    cv2.imwrite("logs/debug/cards_bar_raw_color.png", cards_bar_img)
+    # Optional: whole card bar
+    cards_bar_region = {"top": 1009, "left": 113, "width": 23, "height": 32}
+    cards_bar_color, cards_bar_gray = grab_gray(sct, cards_bar_region)
+
+    cv2.imwrite("logs/debug/cards_bar_raw_color.png", cards_bar_color)
+    cv2.imwrite("logs/debug/cards_bar_gray.png", cards_bar_gray)
 
 print("Saved all debug images to logs/debug/")
